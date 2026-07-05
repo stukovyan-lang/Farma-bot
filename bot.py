@@ -199,22 +199,28 @@ async def cb_next(cq: CallbackQuery, state: FSMContext):
 
 # ---------- режим «Вопрос от ИИ» ----------
 
-async def send_quiz(message: Message, tg_id: int, state: FSMContext):
+async def send_quiz(message: Message, tg_id: int, state: FSMContext,
+                    target_card_id: int | None = None,
+                    exclude_card_id: int | None = None):
     code = active_subject(tg_id)
-    card = db.pick_next_card(conn, tg_id, code, "smart")
-    if not card or not card["reference"]:
-        # пропускаем билеты без текста
-        card = db.pick_next_card(conn, tg_id, code, "random")
+    if target_card_id:
+        card = db.get_card(conn, target_card_id)
+    elif exclude_card_id:
+        # «следующий билет» — берём другой билет с текстом
+        card = db.random_card(conn, code, exclude_id=exclude_card_id)
+    else:
+        card = db.pick_next_card(conn, tg_id, code, "smart")
+        if not card or not card["reference"]:
+            card = db.random_card(conn, code)
     if not card or not card["reference"]:
         await message.answer("Нет доступного материала для вопроса.",
                              reply_markup=kb.back_kb())
         return
 
-    cached = db.get_cached_questions(conn, card["id"])
-    if cached:
-        import random
-        question = random.choice(cached)["question"]
-    else:
+    import random
+    cached = [r["question"] for r in db.get_cached_questions(conn, card["id"])]
+    # для разнообразия при «ещё вопрос» держим запас вопросов
+    if len(cached) < 2:
         await message.answer("Готовлю вопрос…")
         try:
             qs = await ai.generate_questions(card["title"], card["reference"], n=3)
@@ -224,8 +230,10 @@ async def send_quiz(message: Message, tg_id: int, state: FSMContext):
                                 reply_markup=kb.back_kb())
             return
         for q in qs:
-            db.save_question(conn, card["id"], q)
-        question = qs[0] if qs else None
+            if q not in cached:
+                db.save_question(conn, card["id"], q)
+        cached = [r["question"] for r in db.get_cached_questions(conn, card["id"])]
+    question = random.choice(cached) if cached else None
     if not question:
         await message.answer("Не удалось составить вопрос по этому билету.",
                             reply_markup=kb.back_kb())
@@ -285,8 +293,85 @@ async def on_answer(message: Message, state: FSMContext):
         message,
         f"{head}\n\n{result['feedback']}\n\n"
         f"⏭ Следующее повторение через {st.interval} дн.",
-        reply_markup=kb.next_kb("quiz"),
+        reply_markup=kb.quiz_after_kb(card_id),
     )
+
+
+@router.callback_query(F.data.startswith("quizcard:"))
+async def cb_quizcard(cq: CallbackQuery, state: FSMContext):
+    """Ещё один вопрос по этому же билету."""
+    await state.clear()
+    card_id = int(cq.data.split(":")[1])
+    await send_quiz(cq.message, cq.from_user.id, state, target_card_id=card_id)
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("quiznext:"))
+async def cb_quiznext(cq: CallbackQuery, state: FSMContext):
+    """Перейти к вопросу по другому билету."""
+    await state.clear()
+    card_id = int(cq.data.split(":")[1])
+    await send_quiz(cq.message, cq.from_user.id, state, exclude_card_id=card_id)
+    await cq.answer()
+
+
+# ---------- выбор конкретного билета ----------
+
+PER_PAGE = 8
+
+
+@router.callback_query(F.data.startswith("pick:"))
+async def cb_pick(cq: CallbackQuery, state: FSMContext):
+    await state.clear()
+    page = int(cq.data.split(":")[1])
+    code = active_subject(cq.from_user.id)
+    if not code:
+        await cq.answer()
+        return
+    total = db.count_cards(conn, code)
+    cards = db.list_cards(conn, code, PER_PAGE, page * PER_PAGE)
+    await cq.message.answer(
+        "🔎 Выбери билет:",
+        reply_markup=kb.tickets_list_kb(cards, page, total, PER_PAGE),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("pickcard:"))
+async def cb_pickcard(cq: CallbackQuery, state: FSMContext):
+    await state.clear()
+    card_id = int(cq.data.split(":")[1])
+    card = db.get_card(conn, card_id)
+    if not card:
+        await cq.answer("Билет не найден", show_alert=True)
+        return
+    await cq.message.answer(
+        f"🎫 <b>Билет №{card['number']}</b>\n\n{card['title']}\n\nЧто сделать?",
+        reply_markup=kb.ticket_actions_kb(card_id),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("cardshow:"))
+async def cb_cardshow(cq: CallbackQuery, state: FSMContext):
+    """Показать выбранный билет как карточку (с самооценкой)."""
+    await state.clear()
+    card_id = int(cq.data.split(":")[1])
+    card = db.get_card(conn, card_id)
+    if not card:
+        await cq.answer("Билет не найден", show_alert=True)
+        return
+    await cq.message.answer(
+        f"🃏 <b>Билет №{card['number']}</b>\n\n{card['title']}\n\n"
+        "Вспомни ответ и открой проверку.",
+        reply_markup=kb.show_answer_kb(card_id),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(cq: CallbackQuery):
+    await cq.answer()
 
 
 # ---------- статистика ----------

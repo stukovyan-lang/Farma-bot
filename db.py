@@ -233,6 +233,35 @@ def due_count(conn, tg_id: int, subject: str) -> int:
     return row["n"]
 
 
+def count_cards(conn, subject: str) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) n FROM cards WHERE subject_code=?", (subject,)
+    ).fetchone()["n"]
+
+
+def list_cards(conn, subject: str, limit: int, offset: int):
+    """Страница билетов для экрана выбора."""
+    return conn.execute(
+        "SELECT id, number, title FROM cards WHERE subject_code=? "
+        "ORDER BY number ASC LIMIT ? OFFSET ?",
+        (subject, limit, offset),
+    ).fetchall()
+
+
+def random_card(conn, subject: str, exclude_id: int | None = None,
+                require_text: bool = True):
+    """Случайный билет предмета (для «следующего билета» в опросе)."""
+    q = "SELECT * FROM cards WHERE subject_code=? "
+    params = [subject]
+    if require_text:
+        q += "AND length(reference)>=40 "
+    if exclude_id:
+        q += "AND id!=? "
+        params.append(exclude_id)
+    q += "ORDER BY RANDOM() LIMIT 1"
+    return conn.execute(q, params).fetchone()
+
+
 # ---------- вопросы ИИ и кэш объяснений ----------
 
 def get_cached_questions(conn, card_id: int):
