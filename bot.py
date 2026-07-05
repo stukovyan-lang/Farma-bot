@@ -218,29 +218,48 @@ async def send_quiz(message: Message, tg_id: int, state: FSMContext,
         return
 
     import random
+    data = await state.get_data()
+    asked_map = data.get("asked_map", {})
+    key = str(card["id"])
+    asked = asked_map.get(key, [])
+
     cached = [r["question"] for r in db.get_cached_questions(conn, card["id"])]
-    # для разнообразия при «ещё вопрос» держим запас вопросов
-    if len(cached) < 2:
-        await message.answer("Готовлю вопрос…")
+    pool = [q for q in cached if q not in asked]
+
+    # если незаданных вопросов не осталось — догенерируем новые (не повторяя)
+    if not pool:
+        await message.answer("Готовлю новый вопрос…")
         try:
-            qs = await ai.generate_questions(card["title"], card["reference"], n=3)
+            new_qs = await ai.generate_questions(
+                card["title"], card["reference"], n=5, avoid=asked or cached
+            )
         except Exception as e:
             logging.exception("AI question gen failed")
             await message.answer(f"Не удалось сгенерировать вопрос: {e}",
                                 reply_markup=kb.back_kb())
             return
-        for q in qs:
+        for q in new_qs:
             if q not in cached:
                 db.save_question(conn, card["id"], q)
         cached = [r["question"] for r in db.get_cached_questions(conn, card["id"])]
-    question = random.choice(cached) if cached else None
-    if not question:
+        pool = [q for q in cached if q not in asked]
+
+    # крайний случай: все варианты исчерпаны — начинаем круг заново
+    if not pool:
+        asked = []
+        pool = cached
+    if not pool:
         await message.answer("Не удалось составить вопрос по этому билету.",
                             reply_markup=kb.back_kb())
         return
 
+    question = random.choice(pool)
+    asked.append(question)
+    asked_map[key] = asked
+
     await state.set_state(Flow.answering)
-    await state.update_data(card_id=card["id"], question=question)
+    await state.update_data(card_id=card["id"], question=question,
+                            asked_map=asked_map)
     await message.answer(
         f"✍️ <b>Билет №{card['number']}. Вопрос:</b>\n\n{question}\n\n"
         "Напиши ответ текстом.",
@@ -288,7 +307,7 @@ async def on_answer(message: Message, state: FSMContext):
     db.log_review(conn, message.from_user.id, card_id, "quiz", rating)
 
     head = VERDICT_EMOJI.get(verdict, "🟡 Частично")
-    await state.clear()
+    await state.set_state(None)  # выходим из режима ответа, но помним asked_map
     await send_long(
         message,
         f"{head}\n\n{result['feedback']}\n\n"
@@ -300,7 +319,7 @@ async def on_answer(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("quizcard:"))
 async def cb_quizcard(cq: CallbackQuery, state: FSMContext):
     """Ещё один вопрос по этому же билету."""
-    await state.clear()
+    await state.set_state(None)  # сохраняем историю заданных вопросов
     card_id = int(cq.data.split(":")[1])
     await send_quiz(cq.message, cq.from_user.id, state, target_card_id=card_id)
     await cq.answer()
@@ -309,7 +328,7 @@ async def cb_quizcard(cq: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("quiznext:"))
 async def cb_quiznext(cq: CallbackQuery, state: FSMContext):
     """Перейти к вопросу по другому билету."""
-    await state.clear()
+    await state.set_state(None)
     card_id = int(cq.data.split(":")[1])
     await send_quiz(cq.message, cq.from_user.id, state, exclude_card_id=card_id)
     await cq.answer()

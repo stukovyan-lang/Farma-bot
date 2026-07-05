@@ -25,7 +25,7 @@ GROUNDING = (
 
 
 async def _chat(system: str, user: str, max_tokens: int = 700,
-                json_mode: bool = False) -> str:
+                json_mode: bool = False, temperature: float = 0.3) -> str:
     kwargs = dict(
         model=config.AI_MODEL,
         messages=[
@@ -33,7 +33,7 @@ async def _chat(system: str, user: str, max_tokens: int = 700,
             {"role": "user", "content": user},
         ],
         max_tokens=max_tokens,
-        temperature=0.3,
+        temperature=temperature,
     )
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
@@ -52,15 +52,27 @@ async def explain(title: str, reference: str) -> str:
     return await _chat(GROUNDING, prompt, max_tokens=700)
 
 
-async def generate_questions(title: str, reference: str, n: int = 3) -> list[str]:
-    """Сгенерировать n проверочных вопросов, ответы на которые есть в материале."""
+async def generate_questions(title: str, reference: str, n: int = 5,
+                             avoid: list[str] | None = None) -> list[str]:
+    """Сгенерировать n РАЗНЫХ проверочных вопросов по материалу билета."""
+    avoid_block = ""
+    if avoid:
+        joined = "\n".join(f"- {q}" for q in avoid[:12])
+        avoid_block = (
+            "\n\nНЕ повторяй по смыслу эти уже заданные вопросы "
+            f"(придумай про другое):\n{joined}"
+        )
     prompt = (
         f"Материал билета «{title}»:\n\n{reference}\n\n"
-        f"Составь {n} коротких проверочных вопроса по этому материалу. "
-        "На каждый вопрос ответ ДОЛЖЕН однозначно содержаться в материале выше. "
-        'Верни JSON вида {"questions": ["вопрос 1", "вопрос 2", "вопрос 3"]}.'
+        f"Составь {n} РАЗНЫХ проверочных вопроса по этому материалу. "
+        "Вопросы должны затрагивать разные части материала и разные аспекты "
+        "(определение, классификация, свойства, применение, условия, отличия) — "
+        "не дублируй одну и ту же мысль разными словами. На каждый вопрос ответ "
+        "ДОЛЖЕН однозначно содержаться в материале выше." + avoid_block +
+        '\n\nВерни JSON вида {"questions": ["вопрос 1", "вопрос 2", ...]}.'
     )
-    raw = await _chat(GROUNDING, prompt, max_tokens=600, json_mode=True)
+    raw = await _chat(GROUNDING, prompt, max_tokens=700, json_mode=True,
+                      temperature=0.8)
     try:
         data = json.loads(raw)
         qs = data.get("questions", []) if isinstance(data, dict) else data
